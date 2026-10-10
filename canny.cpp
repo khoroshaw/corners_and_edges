@@ -7,6 +7,65 @@
 #include<vector>
 #include<queue>
 
+void calc_sobel(int height, int width, cv::Mat& DMap, cv::Mat& GMap)
+{
+    cv::Mat SobelTempMap(3, width, CV_64F);
+    for(int i = 0; i < height; i++)
+    {
+        double * GaussPtr = GMap.ptr<double>(i);
+        int idx_temp_row = i % 3;
+        double * SobelTempPtr = SobelTempMap.ptr<double>(idx_temp_row);
+        for(int j = 0; j < width; j++)
+        {
+            SobelTempPtr[j] = 0;
+            for(int k = -1; k <= 1; k = k + 2)
+            {
+                int idx_gauss = std::min(width - 1, std::max(0, j + k));
+                SobelTempPtr[j] += k * GaussPtr[idx_gauss];
+            }
+        }
+        if(i > 0)
+        {
+            int idx_calc = i - 1;
+            double * DPtr = DMap.ptr<double>(idx_calc);
+            for(int k = -1; k <= 1; k++)
+            {
+                int idx_calc_sobel = std::min(height - 1, std::max(0, idx_calc + k));
+                int idx_temp_col = idx_calc_sobel % 3;
+                int ratio = (k == 0) ? 2 : 1;
+                double * STPtr = SobelTempMap.ptr<double>(idx_temp_col);
+                for(int j = 0; j < width; j++)
+                {
+                    DPtr[j] += ratio * STPtr[j];
+                }
+            }
+        }
+    }
+    double * DPtr = DMap.ptr<double>(height - 1);
+    for(int k = -1; k <= 1; k++)
+    {
+        int idx_calc_sobel = std::min(height - 1, std::max(0, height - 1 + k));
+        int idx_temp_col = idx_calc_sobel % 3;
+        int ratio = (k == 0) ? 2 : 1;
+        double * STPtr = SobelTempMap.ptr<double>(idx_temp_col);
+        for(int j = 0; j < width; j++)
+        {
+            DPtr[j] += ratio * STPtr[j];
+        }
+    }
+
+    // 未归一化的Dx与Dy的min和max：
+    // -516.676 409.261
+    // -472.163 380.63
+    // 归一化的效果似乎能好些，似乎又不能
+    // cv::normalize(DMap, DMap, -200, 200, cv::NORM_MINMAX);
+    // double NMSMin;
+    // double NMSMax;
+    // cv::Mat NMSFlatten = DMap.reshape(0, 1);
+    // cv::minMaxLoc(NMSFlatten, &NMSMin, &NMSMax);
+    // std::cout << NMSMin << " " << NMSMax << std::endl;
+}
+
 int main()
 {
     /* cv::Mat的索引和二维数组的索引在同一个坐标系下 */
@@ -101,29 +160,28 @@ int main()
     // 换新的思路：没必要分为0, 45, 90, 135，这4类
     // 而是通过比较Dx和Dy的大小关系，结合插值，进行下一个模块的NMS进程
     cv::Mat Magnitude(lena_height, lena_width, CV_64F);
-    cv::Mat DxMap(lena_height, lena_width, CV_64F);
-    cv::Mat DyMap(lena_height, lena_width, CV_64F);
-    for(int i = 0; i < lena_height; i++)
-    {
-        double * GaussPtr0 = GaussMap.ptr<double>(i);
-        double * GaussPtr1 = GaussMap.ptr<double>((i == lena_height - 1) ? lena_height - 1 : i + 1);
-        double * MagPtr = Magnitude.ptr<double>(i);
-        double * DxPtr = DxMap.ptr<double>(i);
-        double * DyPtr = DyMap.ptr<double>(i);
-        for(int j = 0; j < lena_width; j++)
-        {
-            int j1 = (j == lena_width - 1) ? lena_width - 1 : j + 1;
-            // 右为正方向，两次右减左
-            DxPtr[j] = (GaussPtr0[j1] - GaussPtr0[j] + GaussPtr1[j1] - GaussPtr1[j]) / 2.0;
-            // 下为正方向，两次下减上，这里和老师的ppt有点出入
-            // 实际上应该用Sobel算子，不过无所谓
-            DyPtr[j] = (GaussPtr1[j] - GaussPtr0[j] + GaussPtr1[j1] - GaussPtr0[j1]) / 2.0;
-            MagPtr[j] = sqrt(DxPtr[j] * DxPtr[j] + DyPtr[j] * DyPtr[j]);
-        }
-    }
+    cv::Mat DxMap(lena_height, lena_width, CV_64F, cv::Scalar(0));
+    cv::Mat DyMapTran(lena_width, lena_height, CV_64F, cv::Scalar(0));
+
+    // 思路4：换成3x3 Sobel算子计算Dx和Dy
+    // 坑自己的思路：横竖Sobel算子是转置关系，可以将lena转置再转置实现代码复用
+    // 采用Dx的Sobel算子的第一行，[-1, 0, 1]；第三行1与之一致，第二行为2倍
+    calc_sobel(lena_height, lena_width, DxMap, GaussMap);
+    cv::Mat GaussMapTran = GaussMap.t();
+    calc_sobel(lena_width, lena_height, DyMapTran, GaussMapTran);
+    cv::Mat DyMap = DyMapTran.t();
+    cv::sqrt(DxMap.mul(DxMap) + DyMap.mul(DyMap), Magnitude);
+    cv::imwrite("D:\\MyFiles\\Year1a\\cv\\week2_edges\\lena_dx.jpg", DxMap);
+    cv::imwrite("D:\\MyFiles\\Year1a\\cv\\week2_edges\\lena_dy.jpg", DyMap);
+    cv::imwrite("D:\\MyFiles\\Year1a\\cv\\week2_edges\\lena_mag.jpg", Magnitude);
 
     // 计算NMS
     // 这里采用插值进行计算
+    // 问题：lena_edge中的最终结果删去了很多high中检测出来的有效边缘
+    // 前版本的NMS方式对边界点很不友好，会把边界点全部都舍弃掉
+    // 思路1：先处理内部，最后处理边缘
+    // 思路2：变>为>=
+    // 结论：这两种方式都没有实现实质上的改变，也就是说个人认为有问题
     cv::Mat NMSMap(lena_height, lena_width, CV_64F, cv::Scalar(0));
     int x1, y1, x2, y2;
     for(int i = 0; i < lena_height; i++)
@@ -177,7 +235,7 @@ int main()
                     mag_post = (1 - ratio) * Magnitude.at<double>(x2, j) + ratio * Magnitude.at<double>(x2, y1);
                 }
             }
-            if(Mag_ij > mag_prev && Mag_ij > mag_post)
+            if(Mag_ij >= mag_prev && Mag_ij >= mag_post)
             {
                 NMSPtr[j] = Mag_ij;
             }
@@ -193,6 +251,8 @@ int main()
     // 我需要两个容器，一个放旧strong点，一个放新strong点
     // 每次迭代中，旧strong点拿一个扔一个，迭代结束后新strong点全部填入旧strong点
     // 扔掉的点保留在cv::Mat中
+    // 思路3：把NMSMap中的大小做一次归一化之类的操作，也许可以好看些
+    // 结论：没用
     double NMSMin;
     double NMSMax;
     cv::Mat NMSFlatten = NMSMap.reshape(0, 1);
@@ -207,6 +267,7 @@ int main()
     cv::imwrite("D:\\MyFiles\\Year1a\\cv\\week2_edges\\lena_nms_high.jpg", HighMap);
     cv::imwrite("D:\\MyFiles\\Year1a\\cv\\week2_edges\\lena_nms_low.jpg", LowMap);
 
+    // 思路5：Sobel也无效，目前认为问题出在这里，具体是什么没排查出来
     std::queue<int> strongPoints;
     for(int i = 0; i < lena_height; i++)
     {
