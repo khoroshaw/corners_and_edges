@@ -262,19 +262,22 @@ int main()
 
     cv::Mat HighMap(lena_height, lena_width, CV_8U);
     cv::Mat LowMap(lena_height, lena_width, CV_8U);
-    cv::threshold(NMSMap, HighMap, HighThresh, 256, cv::THRESH_BINARY);
+    cv::threshold(NMSMap, HighMap, HighThresh, 256, cv::THRESH_BINARY); // 实际是CV_64F，即6；CV_8U为0
     cv::threshold(NMSMap, LowMap, LowThresh, 256, cv::THRESH_BINARY);
+    std::cout << HighMap.type() << " " << LowMap.type() << std::endl;
     cv::imwrite("D:\\MyFiles\\Year1a\\cv\\week2_edges\\lena_nms_high.jpg", HighMap);
     cv::imwrite("D:\\MyFiles\\Year1a\\cv\\week2_edges\\lena_nms_low.jpg", LowMap);
 
     // 思路5：Sobel也无效，目前认为问题出在这里，具体是什么没排查出来
+    // 上面的“问题1”其实是大问题！！！
+    // 这一段代码其实没起到作用。HighMap没有增添新点，反而失去了一个方块的内容！！！
     std::queue<int> strongPoints;
     for(int i = 0; i < lena_height; i++)
     {
-        uchar * HighPtr = HighMap.ptr<uchar>(i);
+        double * HighPtr = HighMap.ptr<double>(i); // Solved!!! 把uchar换成double即可！！！
         for(int j = 0; j < lena_width; j++)
         {
-            if(HighPtr[j] > 0)
+            if(HighPtr[j] > 1e-6)
             {
                 strongPoints.push(i);
                 strongPoints.push(j);
@@ -288,9 +291,9 @@ int main()
         int idx_j = strongPoints.front();
         strongPoints.pop();
 
-        uchar * HighMPtr = HighMap.ptr<uchar>(idx_i);
+        double * HighMPtr = HighMap.ptr<double>(idx_i);
         HighMPtr[idx_j] = 255;
-        uchar * LowMPtr = LowMap.ptr<uchar>(idx_i);
+        double * LowMPtr = LowMap.ptr<double>(idx_i);
         LowMPtr[idx_j] = 0;
         for(int dx = -1; dx <= 1; dx++)
         {
@@ -298,7 +301,7 @@ int main()
             {
                 continue;
             }
-            uchar * LowPtr = LowMap.ptr<uchar>(idx_i + dx);
+            double * LowPtr = LowMap.ptr<double>(idx_i + dx);
             for(int dy = -1; dy <= 1; dy++)
             {
                 if(idx_j + dy < 0 || idx_j + dy >= lena_width)
