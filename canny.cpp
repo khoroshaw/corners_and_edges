@@ -6,6 +6,7 @@
 #include<opencv2/highgui.hpp>
 #include<vector>
 #include<queue>
+#include<algorithm>
 
 void calc_sobel(int height, int width, cv::Mat& DMap, cv::Mat& GMap)
 {
@@ -57,13 +58,6 @@ void calc_sobel(int height, int width, cv::Mat& DMap, cv::Mat& GMap)
     // 未归一化的Dx与Dy的min和max：
     // -516.676 409.261
     // -472.163 380.63
-    // 归一化的效果似乎能好些，似乎又不能
-    // cv::normalize(DMap, DMap, -200, 200, cv::NORM_MINMAX);
-    // double NMSMin;
-    // double NMSMax;
-    // cv::Mat NMSFlatten = DMap.reshape(0, 1);
-    // cv::minMaxLoc(NMSFlatten, &NMSMin, &NMSMax);
-    // std::cout << NMSMin << " " << NMSMax << std::endl;
 }
 
 int main()
@@ -177,11 +171,6 @@ int main()
 
     // 计算NMS
     // 这里采用插值进行计算
-    // 问题：lena_edge中的最终结果删去了很多high中检测出来的有效边缘
-    // 前版本的NMS方式对边界点很不友好，会把边界点全部都舍弃掉
-    // 思路1：先处理内部，最后处理边缘
-    // 思路2：变>为>=
-    // 结论：这两种方式都没有实现实质上的改变，也就是说个人认为有问题
     cv::Mat NMSMap(lena_height, lena_width, CV_64F, cv::Scalar(0));
     int x1, y1, x2, y2;
     for(int i = 0; i < lena_height; i++)
@@ -251,30 +240,46 @@ int main()
     // 我需要两个容器，一个放旧strong点，一个放新strong点
     // 每次迭代中，旧strong点拿一个扔一个，迭代结束后新strong点全部填入旧strong点
     // 扔掉的点保留在cv::Mat中
-    // 思路3：把NMSMap中的大小做一次归一化之类的操作，也许可以好看些
-    // 结论：没用
-    double NMSMin;
-    double NMSMax;
-    cv::Mat NMSFlatten = NMSMap.reshape(0, 1);
-    cv::minMaxLoc(NMSFlatten, &NMSMin, &NMSMax);
-    double HighThresh = 0.1 * NMSMax; // not perfect, but it have to do now
+    // ChatGPT的建议是：改value threshold为percentile threshold
+    // 将NMSMap的值排序，取前90%为阈值值，需要用到std::sort或者std::nth_element
+    // 因为value threshold和光照强度相关，而不是百分比分布
+    // cv::findNonZero是个很有意思的函数，本意是用于CV_8U，
+    // 1e-6都会被认为是是非零，对于CV_64F可以认为是个Point收集函数
+    std::vector<cv::Point> nms_points;
+    cv::findNonZero(NMSMap, nms_points);
+    int nms_points_size_percentile = static_cast<int>(nms_points.size() * 0.72 - 1);
+    std::nth_element(
+        nms_points.begin(), 
+        nms_points.begin() + nms_points_size_percentile, // 需要其升序
+        nms_points.end(),
+        [&] (cv::Point& a, cv::Point& b)
+        {
+            return (NMSMap.at<double>(a.y, a.x) < NMSMap.at<double>(b.y, b.x));
+        }
+    );
+    cv::Point thesh_point = nms_points[nms_points_size_percentile];
+    double HighThresh = NMSMap.at<double>(thesh_point.y, thesh_point.x);
     double LowThresh = 0.4 * HighThresh;
 
-    cv::Mat HighMap(lena_height, lena_width, CV_8U);
-    cv::Mat LowMap(lena_height, lena_width, CV_8U);
-    cv::threshold(NMSMap, HighMap, HighThresh, 256, cv::THRESH_BINARY); // 实际是CV_64F，即6；CV_8U为0
+    // cv::Mat HighMap(lena_height, lena_width, CV_8U);
+    // cv::Mat LowMap(lena_height, lena_width, CV_8U);
+    // HighMap数据类型实际是CV_64F，即6；CV_8U为0
+    // 测试下来发现，cv::threshold的dst数据类型和src保持一致，而不是遵循cv::Mat初始化时的定义
+    // ChatGPT的解释是，cv::threshold等一系列其他cv函数，如cv::convertTo等，会在内部调用create函数
+    // create会检测dst和src在大小、数据类型等分配上是否一致，一致则沿用，否则开辟新的空间
+    // 所以按理说不应该初始化，直接定义接cv::threshold即可
+    cv::Mat HighMap;
+    cv::Mat LowMap;
+    cv::threshold(NMSMap, HighMap, HighThresh, 256, cv::THRESH_BINARY); 
     cv::threshold(NMSMap, LowMap, LowThresh, 256, cv::THRESH_BINARY);
     std::cout << HighMap.type() << " " << LowMap.type() << std::endl;
     cv::imwrite("D:\\MyFiles\\Year1a\\cv\\week2_edges\\lena_nms_high.jpg", HighMap);
     cv::imwrite("D:\\MyFiles\\Year1a\\cv\\week2_edges\\lena_nms_low.jpg", LowMap);
 
-    // 思路5：Sobel也无效，目前认为问题出在这里，具体是什么没排查出来
-    // 上面的“问题1”其实是大问题！！！
-    // 这一段代码其实没起到作用。HighMap没有增添新点，反而失去了一个方块的内容！！！
     std::queue<int> strongPoints;
     for(int i = 0; i < lena_height; i++)
     {
-        double * HighPtr = HighMap.ptr<double>(i); // Solved!!! 把uchar换成double即可！！！
+        double * HighPtr = HighMap.ptr<double>(i); // Solved!!! 
         for(int j = 0; j < lena_width; j++)
         {
             if(HighPtr[j] > 1e-6)
@@ -318,5 +323,6 @@ int main()
     }
 
     cv::imwrite("D:\\MyFiles\\Year1a\\cv\\week2_edges\\lena_edges.jpg", HighMap);
+    cv::imwrite("D:\\MyFiles\\Year1a\\cv\\week2_edges\\lena_post_edges.jpg", LowMap);
     return 0;
 }
