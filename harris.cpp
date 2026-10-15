@@ -193,31 +193,42 @@ int main()
 
     // 利用R判断角点
     // percentile thresholding
-    std::vector<cv::Point> r_points;
-    cv::findNonZero(RMap, r_points);
-    int percentile_thresh = static_cast<int>(r_points.size() * 0.9 - 1);
-    std::nth_element(
-        r_points.begin(),
-        r_points.begin() + percentile_thresh,
-        r_points.end(),
-        [&] (cv::Point& a, cv::Point& b)
-        {
-            return (RMap.at<double>(a.y, a.x) < RMap.at<double>(b.y, b.x));
-        }
-    );
-    cv::Point threshold_point = r_points[percentile_thresh];
-    double threshold_val = RMap.at<double>(threshold_point.y, threshold_point.x);
+    double threshold_val;
+    bool use_percentile = true;
+    if(use_percentile) // percentile thresh
+    {
+        std::vector<cv::Point> r_points;
+        cv::findNonZero(RMap, r_points);
+        int percentile_thresh = static_cast<int>(r_points.size() * 0.99 - 1);
+        std::nth_element(
+            r_points.begin(),
+            r_points.begin() + percentile_thresh,
+            r_points.end(),
+            [&] (cv::Point& a, cv::Point& b)
+            {
+                return (RMap.at<double>(a.y, a.x) < RMap.at<double>(b.y, b.x));
+            }
+        );
+        cv::Point threshold_point = r_points[percentile_thresh];
+        threshold_val = RMap.at<double>(threshold_point.y, threshold_point.x);
+    }
+    else // maxima thresh
+    {
+        double Rmax, Rmin;
+        cv::minMaxLoc(RMap, &Rmin, &Rmax);
+        threshold_val = 0.01 * Rmax; // 可以是其他比率
+    }
     // 找角点
     cv::Mat RThreshMap;
     cv::threshold(RMap, RThreshMap, threshold_val, 255, cv::THRESH_BINARY);
     std::vector<cv::Point> edge_points;
     cv::findNonZero(RThreshMap, edge_points);
     int edge_points_num = edge_points.size();
-    int edge_points_nms = edge_points_num * 0.005; // 可以是其他比率
-    // std::cout << edge_points_num << std::endl; // 26215
+    int edge_points_anms = edge_points_num * 0.03; // 可以是其他比率
+    // std::cout << edge_points_num << std::endl; // 09per: 26215, 099per: 2622
     
-    bool use_anms = false;
-    bool use_nms = true;
+    bool use_anms = true;
+    bool use_nms = false;
     if(use_anms) // applying adaptive nms
     {
         // anms实现思路：
@@ -225,7 +236,7 @@ int main()
         // 假使能够实现edge_points依据radii vector的降序排序，便可以得到nms的结果
         // 这个思路有问题：i should find the minimum radius instead of the minimum R response
         // Rj - c * Ri，这个差值最小，并不能代表，半径最小；这里我把两个R搞混了！！！
-        double c_ratio = 0.9; // anms: min(Rj > c * Ri)
+        double c_ratio = 0.9; // anms: min(Rj > c * Ri)，也可以取其他比率
         struct point_and_radius
         {
             cv::Point point;
@@ -261,14 +272,14 @@ int main()
         }
         std::nth_element(
             radii_points.begin(),
-            radii_points.begin() + edge_points_nms,
+            radii_points.begin() + edge_points_anms,
             radii_points.end(),
             [&] (point_and_radius& a, point_and_radius& b)
             {
                 return (a.radius > b.radius); // 降序
             }
         );
-        for(int i = 0; i < edge_points_nms; i++)
+        for(int i = 0; i < edge_points_anms; i++)
         {
             cv::circle(lena_img, radii_points[i].point, 5, cv::Scalar(0, 0, 255), 2);
         }
@@ -276,6 +287,8 @@ int main()
     else if(use_nms) // local maximum nms
     {
         // assuming 3x3 nms window
+        int nms_kernel_size = 21; // or here 21x21
+        int half_nms_size = nms_kernel_size / 2;
         for(int i = 0; i < edge_points_num; i++)
         {
             // 遍历edge_points每个点，查看其RMap中3x3近邻，一旦出现response值比之大的就退出
@@ -283,9 +296,9 @@ int main()
             int idx_y = edge_points[i].y;
             double R_now = RMap.at<double>(edge_points[i]);
             bool is_max = true;
-            for(int dx = -1; dx <= 1; dx++)
+            for(int dx = -half_nms_size; dx <= half_nms_size; dx++)
             {
-                for(int dy = -1; dy <= 1; dy++)
+                for(int dy = -half_nms_size; dy <= half_nms_size; dy++)
                 {
                     if(dx == 0 && dy == 0)
                     {
