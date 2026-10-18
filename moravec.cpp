@@ -87,7 +87,7 @@ int main()
                 }
             }
             // 列相加
-            if(i > half_size)
+            if(i > half_size - 1)
             {
                 int idx_row_calc = i - half_size;
                 double * FSPtr = FullSumMap.ptr<double>(idx_row_calc);
@@ -137,7 +137,6 @@ int main()
     // cv::imwrite("D:\\MyFiles\\Year1a\\cv\\week2_edges\\lena_crf.jpg", CRFMap);
 
     // thresholding
-    cv::Mat CRFFlat = CRFMap.reshape(0, 1);
     std::vector<cv::Point> crf_points;
     cv::findNonZero(CRFMap, crf_points);
     int crf_points_num = crf_points.size();
@@ -182,7 +181,7 @@ int main()
         point_rad.radius = rad_min;
         points_and_radii.push_back(point_rad);
     }
-    int anms_thresh = static_cast<int>(crf_points_threshed_num * 0.05); // 比率可以改
+    int anms_thresh = static_cast<int>(crf_points_threshed_num * 0.03); // 比率可以改
     std::nth_element(
         points_and_radii.begin(),
         points_and_radii.begin() + anms_thresh,
