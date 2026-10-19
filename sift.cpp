@@ -15,6 +15,20 @@ struct cvPointwithScale
     double corner_x;
     double corner_y;
     double scale_val;
+    cvPointwithScale& operator=(const cvPointwithScale& point_scale)
+    {
+        corner_x = point_scale.corner_x;
+        corner_y = point_scale.corner_y;
+        scale_val = point_scale.scale_val;
+        return *this;
+    }
+};
+
+struct cvPointScaleOrientation
+{
+    cvPointwithScale cvpoint_and_scale;
+    int main_orientation;
+    std::vector<int> secondary_orientation_vector;
 };
 
 void calcGaussian(int kernel_size, double sigma, cv::Mat& Image, cv::Mat& dst)
@@ -107,24 +121,36 @@ void calcSigmas(int oct_num, int img_num, double sigma, double ratio, std::vecto
     }
 }
 
-void calcGaussiansPerOctave(cv::Mat& Img0, std::vector<double>& sigma_vector, std::vector<cv::Mat>& gauss_vector)
+void calcGaussiansPerOctave(cv::Mat& Img0, int downsample_expo, double sigma_prev_oct, std::vector<double>& sigma_vector, std::vector<cv::Mat>& gauss_vector)
 {
     int height = Img0.rows; // 竖边长度
     int width = Img0.cols; // 横边长度
     int channel_num = Img0.channels(); // 默认使用灰度值，所以是1
-
-    for(auto& sigma_ptr : sigma_vector)
+    int sigma_num = sigma_vector.size();
+    cv::Mat Img1 = Img0;
+    double sigma_increment;
+    double downsample_ratio = pow(2, downsample_expo);
+    for(int i = 0; i < sigma_num; i++)
     {
         cv::Mat Img_Gaussed(height, width, CV_64F, cv::Scalar(0));
+        if(i == 0)
+        {
+            sigma_increment = sqrt(sigma_vector[i] * sigma_vector[i] - sigma_prev_oct * sigma_prev_oct) / downsample_ratio;
+        }
+        else
+        {
+            sigma_increment = sqrt(sigma_vector[i] * sigma_vector[i] - sigma_vector[i - 1] * sigma_vector[i - 1]) / downsample_ratio;
+        }
         // ChatGPT的建议有问题，但是方向是对的
         // 原本我一直设定kernel是3x3，太小了，根本看不出sigma维度后的区别
-        int kernel_size = static_cast<int>(sqrt(std::min(height, width)));
-        kernel_size = (kernel_size % 2 == 0) ? kernel_size - 1 : kernel_size;
-        calcGaussian(kernel_size, sigma_ptr, Img0, Img_Gaussed);
-        // std::cout << sigma_ptr << ", ";
-        gauss_vector.push_back(Img_Gaussed.clone()); // 否则为浅拷贝，会是一行一样的图
+        // int kernel_size = static_cast<int>(sqrt(std::min(height, width)));
+        // kernel_size = (kernel_size % 2 == 0) ? kernel_size - 1 : kernel_size;
+        // OpenCV的ksize计算公式，但是可能ksize会大于下采样后的图像大小
+        int kernel_size = static_cast<int>(std::ceil(2 * sigma_increment * 3 + 1)) | 1;
+        calcGaussian(kernel_size, sigma_increment, Img1, Img_Gaussed);
+        Img1 = Img_Gaussed; // ChatGPT: shallow copy is sufficient
+        gauss_vector.push_back(Img1); 
     }
-    // std::cout << std::endl;
 }
 
 void calcAllGaussians(cv::Mat& Img0, int oct_num, std::vector<std::vector<double>>& sigma_vectors, std::vector<std::vector<cv::Mat>>& gauss_vectors)
@@ -145,14 +171,14 @@ void calcAllGaussians(cv::Mat& Img0, int oct_num, std::vector<std::vector<double
         std::vector<cv::Mat> gauss_imgs;
         if(i == 0)
         {
-            calcGaussiansPerOctave(Img0_64F, sigma_vectors[i], gauss_imgs);
+            calcGaussiansPerOctave(Img0_64F, 0, 0, sigma_vectors[i], gauss_imgs);
         }
         else
         {
             cv::Mat Img_i = gauss_vectors[i - 1][gauss_img_num - 3];
             cv::Mat Img_i_downsampled;
             cv::pyrDown(Img_i, Img_i_downsampled); // 默认下采样1/2
-            calcGaussiansPerOctave(Img_i_downsampled, sigma_vectors[i], gauss_imgs);
+            calcGaussiansPerOctave(Img_i_downsampled, i, sigma_vectors[i - 1][gauss_img_num - 3], sigma_vectors[i], gauss_imgs);
         }
         gauss_vectors.push_back(gauss_imgs);
     }
@@ -398,6 +424,94 @@ void calcEachExtremaShift(std::vector<cv::Mat>& dogs_vector, std::vector<cvPoint
     }
 }
 
+void calcOrientationPerOctave(double sigma_0, double k_ratio, std::vector<cv::Mat>& octave_dogs, std::vector<cvPointwithScale>& cvpoint_scale_vector, std::vector<cvPointScaleOrientation>& up_fit_corners_vector)
+{
+    int height = octave_dogs[0].rows;
+    int width = octave_dogs[0].cols;
+    int channels_num = octave_dogs[0].channels();
+    for(auto& original_cvpoint_scale_vector_i : cvpoint_scale_vector)
+    {
+        auto cvpoint_scale_vector_i = original_cvpoint_scale_vector_i;
+        int round_s = static_cast<int>(std::round(cvpoint_scale_vector_i.scale_val));
+        cv::Mat DoGImg = octave_dogs[round_s];
+        double sigma_weight = 1.5 * sigma_0 * pow(k_ratio, cvpoint_scale_vector_i.scale_val);
+        double r_bound = 3 * sigma_weight;
+        // 计算r_bound区域
+        // ppt中使用的是圆邻域，我这里用方邻域，因为轻松些
+        int x_min = std::max(0, static_cast<int>(std::round(cvpoint_scale_vector_i.corner_x - r_bound)));
+        int y_min = std::max(0, static_cast<int>(std::round(cvpoint_scale_vector_i.corner_y - r_bound)));
+        int x_max = std::min(height - 1, static_cast<int>(std::round(cvpoint_scale_vector_i.corner_x + r_bound)));
+        int y_max = std::min(width - 1, static_cast<int>(std::round(cvpoint_scale_vector_i.corner_y + r_bound)));
+        // histogram，360度分成36个bins
+        std::vector<double> histogram(36, 0);
+        // 开始计算r_bound内的每个像素点的m和theta
+        for(int i = x_min; i <= x_max; i++)
+        {
+            double * DoGPtr = DoGImg.ptr<double>(i);
+            double * DoGPtr0 = DoGImg.ptr<double>(std::max(0, i - 1));
+            double * DoGPtr1 = DoGImg.ptr<double>(std::min(height - 1, i + 1));
+            double expo_x = -(cvpoint_scale_vector_i.corner_x - i) * (cvpoint_scale_vector_i.corner_x - i) / (2 * sigma_weight * sigma_weight);
+            double ratio_x = exp(expo_x);
+            for(int j = y_min; j <= y_max; j++)
+            {
+                double expo_y = -(cvpoint_scale_vector_i.corner_y - j) * (cvpoint_scale_vector_i.corner_y - j) / (2 * sigma_weight * sigma_weight);
+                double ratio_y = exp(expo_y);
+                // 向下和向右为x轴和y轴的正方向
+                double Ly = DoGPtr[std::min(width - 1, j + 1)] - DoGPtr[std::max(0, j - 1)];
+                double Lx = DoGPtr1[j] - DoGPtr0[j];
+                double m = sqrt(Lx * Lx + Ly * Ly);
+                double theta_deg = atan2(Ly, Lx) / M_PI * 180.0 + 180.0; // atan2范围[-π, π]
+                int theta_deg_tenth = static_cast<int>(theta_deg / 10);
+                double hist_coef = theta_deg / 10.0 - theta_deg_tenth;
+                histogram[theta_deg_tenth] += ratio_x * ratio_y * m * hist_coef;
+                histogram[(theta_deg_tenth + 1) % 36] += ratio_x * ratio_y * m * (1 - hist_coef);
+            }
+        }
+        // 取histogram中最大值（可能需要插值）作为主方向
+        // historam做平滑处理，四次多项式系数；某csdn帖子声称这是OpenCV的操作
+        std::vector<double> histogram_smoothed(36, 0);
+        for(int i = 0; i < 36; i++)
+        {
+            histogram_smoothed[i] += 0.375 * histogram[i];
+            histogram_smoothed[i] += 0.25 * (histogram[(i - 1 + 36) % 36] + histogram[(i + 1) % 36]);
+            histogram_smoothed[i] += 0.0625 * (histogram[(i - 2 + 36) % 36] + histogram[(i + 2) % 36]);
+        }
+        // 懒得插值，可能未来可以加一个，这里直接取值最大的bin，作为主方向
+        auto max_hist_itr = std::max_element(histogram_smoothed.begin(), histogram_smoothed.end());
+        // 开始push_back
+        cvPointScaleOrientation point_scale_orientation;
+        point_scale_orientation.cvpoint_and_scale = original_cvpoint_scale_vector_i;
+        int oritentation = static_cast<int>(std::distance(histogram_smoothed.begin(), max_hist_itr));
+        point_scale_orientation.main_orientation = oritentation;
+        // 取80%的max值的作为辅助方向
+        for(int i = 0; i < 36; i++)
+        {
+            if(i == oritentation)
+            {
+                continue;
+            }
+            if(histogram_smoothed[i] > 0.8 * histogram_smoothed[oritentation])
+            {
+                point_scale_orientation.secondary_orientation_vector.push_back(i);
+            }
+        } 
+        up_fit_corners_vector.push_back(point_scale_orientation);
+    }
+}
+
+void calcOrientationForAllOctaves(double sigma_0, double k_ratio, std::vector<std::vector<cv::Mat>>& octave_dogs_vector, std::vector<std::vector<cvPointwithScale>>& cvpoint_scale_vector_vector, std::vector<std::vector<cvPointScaleOrientation>>& up_fit_corners_vector_vector)
+{
+    // 这里假设如果ith octave没有特征点，那么i + 1, i + 2, ...均没有特征点
+    // 所以octave_num不是octave_num的size，而是cvpoint_scale_vector_vector的size
+    int octave_num = cvpoint_scale_vector_vector.size();
+    for(int i = 0; i < octave_num; i++)
+    {
+        std::vector<cvPointScaleOrientation> up_fit_corners_vector;
+        calcOrientationPerOctave(sigma_0, k_ratio, octave_dogs_vector[i], cvpoint_scale_vector_vector[i], up_fit_corners_vector);
+        up_fit_corners_vector_vector.push_back(up_fit_corners_vector);
+    }
+}
+
 int main()
 {
     // 读入图像并转成灰度图
@@ -438,6 +552,15 @@ int main()
     calcAllGaussians(gray_img, octave_num, sigma_value_double_vector, all_octaves_vector);
     std::cout << "Gaussian filtered images calculation complete." << std::endl;
 
+    // // 查看下保存的GF图像
+    // for(int i = 0; i < all_octaves_vector.size(); i++)
+    // {
+    //     for(int j = 0; j < all_octaves_vector[i].size(); j++)
+    //     {
+    //         cv::imwrite("D:\\MyFiles\\Year1a\\cv\\week2_edges\\lena_sift_GF_" + std::to_string(i) + "_" + std::to_string(j) + ".jpg", all_octaves_vector[i][j]);
+    //     }
+    // }
+
     // 计算金字塔差值，即DoG
     std::vector<std::vector<cv::Mat>> octave_dogs_vector;
     std::cout << "Calculating DoG images..." << std::endl;
@@ -451,6 +574,15 @@ int main()
         octave_dogs_vector.push_back(octave_dogs_i);
     }
     std::cout << "DoG images calculation complete." << std::endl;
+
+    // // 查看下保存的DoG图像
+    // for(int i = 0; i < octave_dogs_vector.size(); i++)
+    // {
+    //     for(int j = 0; j < octave_dogs_vector[i].size(); j++)
+    //     {
+    //         cv::imwrite("D:\\MyFiles\\Year1a\\cv\\week2_edges\\lena_sift_DoG_" + std::to_string(i) + "_" + std::to_string(j) + ".jpg", octave_dogs_vector[i][j]);
+    //     }
+    // }
 
     // 每个octave找26近邻最小点，并同时开始精确定位各个点
     std::vector<std::vector<cvPointwithScale>> corners_vector_vector;
@@ -473,20 +605,50 @@ int main()
         corners_vector_vector.push_back(fit_corners_vector);
     }
 
-    // 整合所有octave的特征点
-    std::vector<cvPointwithScale> up_fit_corners_vector;
+    // 特征点主方向计算，目的是为了使特征点具有旋转不变性
+    // ChatGPT建议在原octave中计算，而不是转换到原图大小再计算
+    std::vector<std::vector<cvPointScaleOrientation>> up_fit_corners_vector_vector;
+    std::cout << "Calculating main and secondary orientations of each interest point..." << std::endl;
+    calcOrientationForAllOctaves(sigma_0, k_ratio, octave_dogs_vector, corners_vector_vector, up_fit_corners_vector_vector);
+    std::cout << "Main and secondary orientations of each interest point completed." << std::endl;
+
+    // 整合所有octave的特征点并计算主方向
+    // 这段代码要大改！！！！！！
+    std::vector<cvPointScaleOrientation> up_fit_corners_vector;
     std::cout << "Re-organizing interest points from all octaves..." << std::endl;
     double up_ratio = 1.0;
-    for(int i = 0; i < octave_num; i++)
+    int octave_left_num = up_fit_corners_vector_vector.size(); // 有些octave可能没有贡献特征点
+    for(int i = 0; i < octave_left_num; i++)
     {
-        for(auto& original_down_corner_scale : corners_vector_vector[i])
+        for(auto& original_down_corner_scale_ori : up_fit_corners_vector_vector[i])
         {
-            auto down_corner_scale = original_down_corner_scale;
-            down_corner_scale.corner_x *= up_ratio;
-            down_corner_scale.corner_y *= up_ratio;
-            down_corner_scale.scale_val = sigma_0 * up_ratio * pow(k_ratio, down_corner_scale.scale_val);
-            up_fit_corners_vector.push_back(down_corner_scale);
-            cv::circle(lena_img, cv::Point(down_corner_scale.corner_y, down_corner_scale.corner_x), 5, cv::Scalar(0, 0, 255), 2);
+            auto down_corner_scale_ori = original_down_corner_scale_ori;
+            down_corner_scale_ori.cvpoint_and_scale.corner_x *= up_ratio;
+            down_corner_scale_ori.cvpoint_and_scale.corner_y *= up_ratio;
+            down_corner_scale_ori.cvpoint_and_scale.scale_val = sigma_0 * up_ratio * pow(k_ratio, down_corner_scale_ori.cvpoint_and_scale.scale_val);
+            // 画主方向向量需要的量
+            double main_ori_length = 3 * down_corner_scale_ori.cvpoint_and_scale.scale_val;
+            double main_ori_rad = static_cast<double>(down_corner_scale_ori.main_orientation / 180.0 * M_PI);
+            double x_end = down_corner_scale_ori.cvpoint_and_scale.corner_x + main_ori_length * cos(main_ori_rad);
+            double y_end = down_corner_scale_ori.cvpoint_and_scale.corner_y + main_ori_length * sin(main_ori_rad);
+            double x_end_clamp = std::min(lena_height - 1, std::max(0, static_cast<int>(x_end)));
+            double y_end_clamp = std::min(lena_width - 1, std::max(0, static_cast<int>(y_end)));
+            // 画点的位置
+            cv::circle(
+                lena_img, 
+                cv::Point(down_corner_scale_ori.cvpoint_and_scale.corner_y, down_corner_scale_ori.cvpoint_and_scale.corner_x),
+                cvRound(down_corner_scale_ori.cvpoint_and_scale.scale_val),
+                cv::Scalar(0, 255, 0), 1
+            );
+            // 画主方向向量
+            cv::arrowedLine(
+                lena_img, 
+                cv::Point(down_corner_scale_ori.cvpoint_and_scale.corner_y, down_corner_scale_ori.cvpoint_and_scale.corner_x),
+                cv::Point(y_end_clamp, x_end_clamp),
+                cv::Scalar(0, 0, 255), 1,
+                cv::LINE_AA, 0, 0.25
+            );
+            up_fit_corners_vector.push_back(down_corner_scale_ori);
         }
         up_ratio *= 2.0;
     }
