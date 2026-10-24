@@ -15,12 +15,13 @@ struct cvPointwithScale
     double corner_x;
     double corner_y;
     double scale_val;
+
     cvPointwithScale& operator=(const cvPointwithScale& point_scale)
     {
-        corner_x = point_scale.corner_x;
+        corner_x = point_scale.corner_x; // C++语法表示这里可以省略this->
         corner_y = point_scale.corner_y;
         scale_val = point_scale.scale_val;
-        return *this;
+        return *this; // 但是这里作为返回值肯定不能省略this指针
     }
 };
 
@@ -29,6 +30,27 @@ struct cvPointScaleOrientation
     cvPointwithScale cvpoint_and_scale;
     int main_orientation;
     std::vector<int> secondary_orientation_vector;
+
+    cvPointScaleOrientation& operator=(const cvPointScaleOrientation& point_scale_ori)
+    {
+        cvpoint_and_scale = point_scale_ori.cvpoint_and_scale;
+        main_orientation = point_scale_ori.main_orientation; 
+        secondary_orientation_vector = point_scale_ori.secondary_orientation_vector;
+        return *this; 
+    }
+};
+
+struct cvPointScaleOrientationDescriptor
+{
+    cvPointScaleOrientation cvpoint_scale_ori;
+    std::vector<double> descriptor;
+
+    cvPointScaleOrientationDescriptor& operator=(const cvPointScaleOrientationDescriptor& point_scale_ori_des)
+    {
+        cvpoint_scale_ori = point_scale_ori_des.cvpoint_scale_ori;
+        descriptor = point_scale_ori_des.descriptor;
+        return *this; 
+    }
 };
 
 void calcGaussian(int kernel_size, double sigma, cv::Mat& Image, cv::Mat& dst)
@@ -424,8 +446,9 @@ void calcEachExtremaShift(std::vector<cv::Mat>& dogs_vector, std::vector<cvPoint
     }
 }
 
-void calcOrientationPerOctave(double sigma_0, double k_ratio, std::vector<cv::Mat>& octave_dogs, std::vector<cvPointwithScale>& cvpoint_scale_vector, std::vector<cvPointScaleOrientation>& up_fit_corners_vector)
+void calcOrientationPerOctave(double sigma_0, double k_ratio, std::vector<cv::Mat>& octave_dogs, std::vector<cvPointwithScale>& cvpoint_scale_vector, std::vector<cvPointScaleOrientation>& corner_scale_ori_vector)
 {
+    // 写这个函数的时候误以为是在DoG上找主方向，所以用了octave_dogs变量名，实际上是gaussians
     int height = octave_dogs[0].rows;
     int width = octave_dogs[0].cols;
     int channels_num = octave_dogs[0].channels();
@@ -462,9 +485,10 @@ void calcOrientationPerOctave(double sigma_0, double k_ratio, std::vector<cv::Ma
                 double m = sqrt(Lx * Lx + Ly * Ly);
                 double theta_deg = atan2(Ly, Lx) / M_PI * 180.0 + 180.0; // atan2范围[-π, π]
                 int theta_deg_tenth = static_cast<int>(theta_deg / 10);
+                // 离得近，比例越大
                 double hist_coef = theta_deg / 10.0 - theta_deg_tenth;
-                histogram[theta_deg_tenth] += ratio_x * ratio_y * m * hist_coef;
-                histogram[(theta_deg_tenth + 1) % 36] += ratio_x * ratio_y * m * (1 - hist_coef);
+                histogram[theta_deg_tenth] += ratio_x * ratio_y * m * (1 - hist_coef);
+                histogram[(theta_deg_tenth + 1) % 36] += ratio_x * ratio_y * m * hist_coef;
             }
         }
         // 取histogram中最大值（可能需要插值）作为主方向
@@ -495,20 +519,165 @@ void calcOrientationPerOctave(double sigma_0, double k_ratio, std::vector<cv::Ma
                 point_scale_orientation.secondary_orientation_vector.push_back(i);
             }
         } 
-        up_fit_corners_vector.push_back(point_scale_orientation);
+        corner_scale_ori_vector.push_back(point_scale_orientation);
     }
 }
 
-void calcOrientationForAllOctaves(double sigma_0, double k_ratio, std::vector<std::vector<cv::Mat>>& octave_dogs_vector, std::vector<std::vector<cvPointwithScale>>& cvpoint_scale_vector_vector, std::vector<std::vector<cvPointScaleOrientation>>& up_fit_corners_vector_vector)
+void calcOrientationForAllOctaves(double sigma_0, double k_ratio, std::vector<std::vector<cv::Mat>>& octave_dogs_vector, std::vector<std::vector<cvPointwithScale>>& cvpoint_scale_vector_vector, std::vector<std::vector<cvPointScaleOrientation>>& corner_scale_ori_vector_vector)
 {
+    // 写这个函数的时候误以为是在DoG上找主方向，所以用了octave_dogs_vector变量名，实际上是gaussians
     // 这里假设如果ith octave没有特征点，那么i + 1, i + 2, ...均没有特征点
     // 所以octave_num不是octave_num的size，而是cvpoint_scale_vector_vector的size
     int octave_num = cvpoint_scale_vector_vector.size();
     for(int i = 0; i < octave_num; i++)
     {
-        std::vector<cvPointScaleOrientation> up_fit_corners_vector;
-        calcOrientationPerOctave(sigma_0, k_ratio, octave_dogs_vector[i], cvpoint_scale_vector_vector[i], up_fit_corners_vector);
-        up_fit_corners_vector_vector.push_back(up_fit_corners_vector);
+        std::vector<cvPointScaleOrientation> corner_scale_ori_vector;
+        calcOrientationPerOctave(sigma_0, k_ratio, octave_dogs_vector[i], cvpoint_scale_vector_vector[i], corner_scale_ori_vector);
+        corner_scale_ori_vector_vector.push_back(corner_scale_ori_vector);
+    }
+}
+
+void calcDescriptorPerOctave(double sigma_0, double k_ratio, int sub_region_num, std::vector<cv::Mat>& octave_dogs, std::vector<cvPointScaleOrientation>& cvpoint_scale_ori_vector, std::vector<cvPointScaleOrientationDescriptor>& corner_scale_ori_des_vector)
+{
+    // 写这个函数的时候误以为是在DoG上找主方向，所以用了octave_dogs变量名，实际上是gaussians
+    int height = octave_dogs[0].rows;
+    int width = octave_dogs[0].cols;
+    int channels_num = octave_dogs[0].channels();
+    for(auto& original_cvpoint_scale_ori_i : cvpoint_scale_ori_vector)
+    {
+        auto cvpoint_scale_ori_i = original_cvpoint_scale_ori_i;
+        int round_s = static_cast<int>(std::round(cvpoint_scale_ori_i.cvpoint_and_scale.scale_val));
+        cv::Mat DoGImg = octave_dogs[round_s];
+        double sigma_oct = sigma_0 * pow(k_ratio, cvpoint_scale_ori_i.cvpoint_and_scale.scale_val);
+        double sigma_scale = 3.0 * sigma_oct; // 每个子区域的边长
+        // 构建描述子
+        // 首先需要在原图上构建一个描述子坐标系（或者说空间、网格）
+        // 把corner的邻域分割成sub_region_num x sub_region_num个子区域
+        // 每个子区域的边长是sigma_scale
+        // 同时，还应用到了trilinear interpolation
+        // 插值的操作导致sub_region_num x sub_region_num之外的点也可以贡献于描述子的构建
+        // 故有sigma_scale * (sub_region_num + 1)，我个人的理解是一条轴两边各扩展半个单位的采样区间
+        // side_bound是计算描述子的正方形区域的边长
+        // csdn帖子的意思是计算以上述正方形区域的外接圆作为radius，但是我觉得差不多
+        double side_bound = sigma_scale * (sub_region_num + 1);
+        double half_side = side_bound / 2.0;
+        int x_min = std::max(0, static_cast<int>(std::round(cvpoint_scale_ori_i.cvpoint_and_scale.corner_x - half_side)));
+        int y_min = std::max(0, static_cast<int>(std::round(cvpoint_scale_ori_i.cvpoint_and_scale.corner_y - half_side)));
+        int x_max = std::min(height - 1, static_cast<int>(std::round(cvpoint_scale_ori_i.cvpoint_and_scale.corner_x + half_side)));
+        int y_max = std::min(width - 1, static_cast<int>(std::round(cvpoint_scale_ori_i.cvpoint_and_scale.corner_y + half_side)));
+        // 默认sub_region_num = 4，描述子空间共4 x 4个子区域
+        // 对每个主方向系下的子区域中的像素点，计算其原图系中的梯度，并归类到主方向系下各自区域的8 bins histogram
+        // 各histogram的统计值构成描述子
+        // 4 * 4 * 8 = 128维度，可以看成是一个三维histogram：H(4, 4, 8)
+        // 每遍历一个原图系中的像素点，更改这个三维histogram中的8项，即可以插值的行、列、角度三维，各两个
+        // 实质上是一个三维张量
+        std::vector<double> descriptor(128, 0);
+        for(int i = x_min; i <= x_max; i++)
+        {
+            // 在原图系中计算m和phi
+            double * DoGPtr = DoGImg.ptr<double>(i);
+            double * DoGPtr0 = DoGImg.ptr<double>(std::max(0, i - 1));
+            double * DoGPtr1 = DoGImg.ptr<double>(std::min(height - 1, i + 1));
+            double dx = i - cvpoint_scale_ori_i.cvpoint_and_scale.corner_x;     
+            for(int j = y_min; j <= y_max; j++)
+            {
+                double dy = j - cvpoint_scale_ori_i.cvpoint_and_scale.corner_y;
+                // 向下和向右为x轴和y轴的正方向
+                double Ly = DoGPtr[std::min(width - 1, j + 1)] - DoGPtr[std::max(0, j - 1)];
+                double Lx = DoGPtr1[j] - DoGPtr0[j];
+                // 计算得到m和phi
+                double m = sqrt(Lx * Lx + Ly * Ly);
+                double phi_deg = atan2(Ly, Lx) / M_PI * 180.0 + 180.0; // atan2范围[-π, π]
+                // 以逆时针旋转为正方向
+                double theta_deg = static_cast<double>(cvpoint_scale_ori_i.main_orientation); // 原本设计的是int
+                double delta_rad = (theta_deg - phi_deg) / 180.0 * M_PI;
+                double delta_deg = phi_deg - theta_deg;
+                // 将偏移量[dx, dy]从图像坐标系，变换到主方向系
+                double dx_ori_coord = cos(delta_rad) * dx - sin(delta_rad) * dy;
+                double dy_ori_coord = sin(delta_rad) * dx + cos(delta_rad) * dy;
+                // 转换到描述子空间
+                // 除以sigma_scale是将旋转后的坐标，转换到描述子空间，即能够和子区域索引对应
+                // 加sub_region_num / 2，是将两个空间的中心点对齐，即令corner对应“行2列2”（sub_region_num = 4）
+                double dx_des_space_rep = dx_ori_coord / sigma_scale + sub_region_num / 2.0;
+                double dy_des_space_rep = dy_ori_coord / sigma_scale + sub_region_num / 2.0;
+                // 分别对dx_des_space_rep，dy_des_space_rep，delta_deg三者做trilinear interpolation
+                int dx_idx = static_cast<int>(dx_des_space_rep);
+                int dy_idx = static_cast<int>(dy_des_space_rep);
+                // 角度按45度分为8个区域
+                int deg_idx = static_cast<int>(fabs(delta_deg)) / 45;
+                // 计算各比率
+                double dx_ratio = dx_des_space_rep - dx_idx;
+                double dy_ratio = dy_des_space_rep - dy_idx;
+                double deg_ratio = fabs(delta_deg) / 45.0 - deg_idx;
+                // 计算加权梯度幅值
+                double num = dx_ori_coord * dx_ori_coord + dy_ori_coord * dy_ori_coord;
+                double denom = -2 * (0.5 * sub_region_num) * (0.5 * sub_region_num);
+                double weighted_grad_norm = m * exp(num / denom);
+                // histogram统计值
+                for(int ix = 0; ix <= 1; ix++)
+                {
+                    int idx_x = dx_idx + ix;
+                    if(idx_x < 0 || idx_x > 3)
+                    {
+                        continue;
+                    }
+                    double weight_x = (ix == 0) ? (1 - dx_ratio) : dx_ratio;
+                    for(int iy = 0; iy <= 1; iy++)
+                    {
+                        int idx_y = dy_idx + iy;
+                        if(idx_y < 0 || idx_y > 3)
+                        {
+                            continue;
+                        }
+                        double weight_y = (iy == 0) ? (1 - dy_ratio) : dy_ratio;
+                        // 按照C语言的三维数组的构想
+                        descriptor[idx_x * sub_region_num * 8 + idx_y * 8 + deg_idx] += weighted_grad_norm * weight_x * weight_y * (1 - deg_ratio);
+                        descriptor[idx_x * sub_region_num * 8 + idx_y * 8 + (deg_idx + 1) % 8] += weighted_grad_norm * weight_x * weight_y * deg_ratio;
+                    }
+                }
+            }
+        }
+        // descriptor向量归一化
+        double des_squared = 0.0;
+        for(auto& des : descriptor)
+        {
+            des_squared += des * des;
+        }
+        double des_sqrt = sqrt(des_squared);
+        for(auto& des : descriptor)
+        {
+            des /= des_sqrt;
+            des = std::min(des, 0.2);
+        }
+        des_squared = 0.0;
+        for(auto& des : descriptor)
+        {
+            des_squared += des * des;
+        }
+        des_sqrt = sqrt(des_squared);
+        for(auto& des : descriptor)
+        {
+            des /= des_sqrt;
+        }
+        cvPointScaleOrientationDescriptor point_scale_orient_des;
+        point_scale_orient_des.descriptor = descriptor;
+        point_scale_orient_des.cvpoint_scale_ori = cvpoint_scale_ori_i;
+
+        corner_scale_ori_des_vector.push_back(point_scale_orient_des);
+    }
+}
+
+void calcDescriptorForAllOctaves(double sigma_0, double k_ratio, int sub_region_num, std::vector<std::vector<cv::Mat>>& octave_dogs_vector, std::vector<std::vector<cvPointScaleOrientation>>& cvpoint_scale_ori_vector_vector, std::vector<std::vector<cvPointScaleOrientationDescriptor>>& corner_scale_ori_des_vector_vector)
+{
+    // 写这个函数的时候误以为是在DoG上找主方向，所以用了octave_dogs_vector变量名，实际上是gaussians
+    // 这里假设如果ith octave没有特征点，那么i + 1, i + 2, ...均没有特征点
+    // 所以octave_num不是octave_num的size，而是cvpoint_scale_vector_vector的size
+    int octave_num = cvpoint_scale_ori_vector_vector.size();
+    for(int i = 0; i < octave_num; i++)
+    {
+        std::vector<cvPointScaleOrientationDescriptor> corner_scale_ori_des_vector;
+        calcDescriptorPerOctave(sigma_0, k_ratio, sub_region_num, octave_dogs_vector[i], cvpoint_scale_ori_vector_vector[i], corner_scale_ori_des_vector);
+        corner_scale_ori_des_vector_vector.push_back(corner_scale_ori_des_vector);
     }
 }
 
@@ -607,48 +776,58 @@ int main()
 
     // 特征点主方向计算，目的是为了使特征点具有旋转不变性
     // ChatGPT建议在原octave中计算，而不是转换到原图大小再计算
-    std::vector<std::vector<cvPointScaleOrientation>> up_fit_corners_vector_vector;
-    std::cout << "Calculating main and secondary orientations of each interest point..." << std::endl;
-    calcOrientationForAllOctaves(sigma_0, k_ratio, octave_dogs_vector, corners_vector_vector, up_fit_corners_vector_vector);
-    std::cout << "Main and secondary orientations of each interest point completed." << std::endl;
+    // 大错误！！！主方向不是在DoG上算的，而是Gaussians！！！
+    // 也就是说，严格来讲，calcOrientationForAllOctaves和calcDescriptors可以合并，或者至少说是嵌套的
+    std::vector<std::vector<cvPointScaleOrientation>> corner_scale_ori_vector_vector;
+    std::cout << "Calculating dominant and secondary orientations of each interest point..." << std::endl;
+    calcOrientationForAllOctaves(sigma_0, k_ratio, all_octaves_vector, corners_vector_vector, corner_scale_ori_vector_vector);
+    std::cout << "Dominant and secondary orientations of each interest point completed." << std::endl;
+
+    // 计算描述子，流程和计算主方向高度重复，其实是可以合并的
+    // 但是懒得合并了，这里代码冗余了
+    std::vector<std::vector<cvPointScaleOrientationDescriptor>> corner_scale_ori_des_vector_vector;
+    int sub_region_num = 4; // 默认是4
+    std::cout << "Calculating descriptor of each interest point..." << std::endl;
+    calcDescriptorForAllOctaves(sigma_0, k_ratio, sub_region_num, all_octaves_vector, corner_scale_ori_vector_vector, corner_scale_ori_des_vector_vector);
+    std::cout << "Descriptor of each interest point completed." << std::endl;
 
     // 整合所有octave的特征点并计算主方向
-    // 这段代码要大改！！！！！！
-    std::vector<cvPointScaleOrientation> up_fit_corners_vector;
+    // 最后的整合要小改！！！主要是要改数据类型，因为又要加一个描述子
+    std::vector<cvPointScaleOrientationDescriptor> up_fit_corners_vector;
     std::cout << "Re-organizing interest points from all octaves..." << std::endl;
     double up_ratio = 1.0;
-    int octave_left_num = up_fit_corners_vector_vector.size(); // 有些octave可能没有贡献特征点
+    int octave_left_num = corner_scale_ori_des_vector_vector.size(); // 有些octave可能没有贡献特征点
     for(int i = 0; i < octave_left_num; i++)
     {
-        for(auto& original_down_corner_scale_ori : up_fit_corners_vector_vector[i])
+        for(auto& original_down_corner_scale_ori_des : corner_scale_ori_des_vector_vector[i])
         {
-            auto down_corner_scale_ori = original_down_corner_scale_ori;
-            down_corner_scale_ori.cvpoint_and_scale.corner_x *= up_ratio;
-            down_corner_scale_ori.cvpoint_and_scale.corner_y *= up_ratio;
-            down_corner_scale_ori.cvpoint_and_scale.scale_val = sigma_0 * up_ratio * pow(k_ratio, down_corner_scale_ori.cvpoint_and_scale.scale_val);
+            auto down_corner_scale_ori_des = original_down_corner_scale_ori_des;
+            down_corner_scale_ori_des.cvpoint_scale_ori.cvpoint_and_scale.corner_x *= up_ratio;
+            down_corner_scale_ori_des.cvpoint_scale_ori.cvpoint_and_scale.corner_y *= up_ratio;
+            down_corner_scale_ori_des.cvpoint_scale_ori.cvpoint_and_scale.scale_val = sigma_0 * up_ratio * pow(k_ratio, down_corner_scale_ori_des.cvpoint_scale_ori.cvpoint_and_scale.scale_val);
             // 画主方向向量需要的量
-            double main_ori_length = 3 * down_corner_scale_ori.cvpoint_and_scale.scale_val;
-            double main_ori_rad = static_cast<double>(down_corner_scale_ori.main_orientation / 180.0 * M_PI);
-            double x_end = down_corner_scale_ori.cvpoint_and_scale.corner_x + main_ori_length * cos(main_ori_rad);
-            double y_end = down_corner_scale_ori.cvpoint_and_scale.corner_y + main_ori_length * sin(main_ori_rad);
+            double main_ori_length = 3 * down_corner_scale_ori_des.cvpoint_scale_ori.cvpoint_and_scale.scale_val;
+            double main_ori_rad = static_cast<double>(down_corner_scale_ori_des.cvpoint_scale_ori.main_orientation / 180.0 * M_PI);
+            double x_end = down_corner_scale_ori_des.cvpoint_scale_ori.cvpoint_and_scale.corner_x + main_ori_length * cos(main_ori_rad);
+            double y_end = down_corner_scale_ori_des.cvpoint_scale_ori.cvpoint_and_scale.corner_y + main_ori_length * sin(main_ori_rad);
             double x_end_clamp = std::min(lena_height - 1, std::max(0, static_cast<int>(x_end)));
             double y_end_clamp = std::min(lena_width - 1, std::max(0, static_cast<int>(y_end)));
             // 画点的位置
             cv::circle(
                 lena_img, 
-                cv::Point(down_corner_scale_ori.cvpoint_and_scale.corner_y, down_corner_scale_ori.cvpoint_and_scale.corner_x),
-                cvRound(down_corner_scale_ori.cvpoint_and_scale.scale_val),
+                cv::Point(down_corner_scale_ori_des.cvpoint_scale_ori.cvpoint_and_scale.corner_y, down_corner_scale_ori_des.cvpoint_scale_ori.cvpoint_and_scale.corner_x),
+                cvRound(down_corner_scale_ori_des.cvpoint_scale_ori.cvpoint_and_scale.scale_val),
                 cv::Scalar(0, 255, 0), 1
             );
             // 画主方向向量
             cv::arrowedLine(
                 lena_img, 
-                cv::Point(down_corner_scale_ori.cvpoint_and_scale.corner_y, down_corner_scale_ori.cvpoint_and_scale.corner_x),
+                cv::Point(down_corner_scale_ori_des.cvpoint_scale_ori.cvpoint_and_scale.corner_y, down_corner_scale_ori_des.cvpoint_scale_ori.cvpoint_and_scale.corner_x),
                 cv::Point(y_end_clamp, x_end_clamp),
                 cv::Scalar(0, 0, 255), 1,
                 cv::LINE_AA, 0, 0.25
             );
-            up_fit_corners_vector.push_back(down_corner_scale_ori);
+            up_fit_corners_vector.push_back(down_corner_scale_ori_des);
         }
         up_ratio *= 2.0;
     }
