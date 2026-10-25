@@ -483,7 +483,8 @@ void calcOrientationPerOctave(double sigma_0, double k_ratio, std::vector<cv::Ma
                 double Ly = DoGPtr[std::min(width - 1, j + 1)] - DoGPtr[std::max(0, j - 1)];
                 double Lx = DoGPtr1[j] - DoGPtr0[j];
                 double m = sqrt(Lx * Lx + Ly * Ly);
-                double theta_deg = atan2(Ly, Lx) / M_PI * 180.0 + 180.0; // atan2范围[-π, π]
+                double theta_deg = atan2(Ly, Lx) / M_PI * 180.0; // atan2范围[-π, π]
+                theta_deg = (theta_deg < 0) ? (theta_deg + 360.0) : theta_deg;
                 int theta_deg_tenth = static_cast<int>(theta_deg / 10);
                 // 离得近，比例越大
                 double hist_coef = theta_deg / 10.0 - theta_deg_tenth;
@@ -505,16 +506,16 @@ void calcOrientationPerOctave(double sigma_0, double k_ratio, std::vector<cv::Ma
         // 开始push_back
         cvPointScaleOrientation point_scale_orientation;
         point_scale_orientation.cvpoint_and_scale = original_cvpoint_scale_vector_i;
-        int oritentation = static_cast<int>(std::distance(histogram_smoothed.begin(), max_hist_itr));
-        point_scale_orientation.main_orientation = oritentation;
+        int dom_orient = static_cast<int>(std::distance(histogram_smoothed.begin(), max_hist_itr));
+        point_scale_orientation.main_orientation = dom_orient * 10; // 别忘了histogram是除以10之后的
         // 取80%的max值的作为辅助方向
         for(int i = 0; i < 36; i++)
         {
-            if(i == oritentation)
+            if(i == dom_orient)
             {
                 continue;
             }
-            if(histogram_smoothed[i] > 0.8 * histogram_smoothed[oritentation])
+            if(histogram_smoothed[i] > 0.8 * histogram_smoothed[dom_orient])
             {
                 point_scale_orientation.secondary_orientation_vector.push_back(i);
             }
@@ -587,30 +588,37 @@ void calcDescriptorPerOctave(double sigma_0, double k_ratio, int sub_region_num,
                 double Lx = DoGPtr1[j] - DoGPtr0[j];
                 // 计算得到m和phi
                 double m = sqrt(Lx * Lx + Ly * Ly);
-                double phi_deg = atan2(Ly, Lx) / M_PI * 180.0 + 180.0; // atan2范围[-π, π]
+                double phi_deg = atan2(Ly, Lx) / M_PI * 180.0; // atan2范围[-π, π]
+                phi_deg = (phi_deg < 0) ? (phi_deg + 360.0) : phi_deg;
                 // 以逆时针旋转为正方向
                 double theta_deg = static_cast<double>(cvpoint_scale_ori_i.main_orientation); // 原本设计的是int
-                double delta_rad = (theta_deg - phi_deg) / 180.0 * M_PI;
-                double delta_deg = phi_deg - theta_deg;
-                // 将偏移量[dx, dy]从图像坐标系，变换到主方向系
-                double dx_ori_coord = cos(delta_rad) * dx - sin(delta_rad) * dy;
-                double dy_ori_coord = sin(delta_rad) * dx + cos(delta_rad) * dy;
+                double theta_rad = theta_deg / 180.0 * M_PI;
+                // 将偏移量[dx, dy]在图像坐标系中的相对位置，表达在主方向系中
+                double dx_ori_coord = cos(theta_rad) * dx + sin(theta_rad) * dy;
+                double dy_ori_coord = -sin(theta_rad) * dx + cos(theta_rad) * dy;
                 // 转换到描述子空间
                 // 除以sigma_scale是将旋转后的坐标，转换到描述子空间，即能够和子区域索引对应
                 // 加sub_region_num / 2，是将两个空间的中心点对齐，即令corner对应“行2列2”（sub_region_num = 4）
                 double dx_des_space_rep = dx_ori_coord / sigma_scale + sub_region_num / 2.0;
                 double dy_des_space_rep = dy_ori_coord / sigma_scale + sub_region_num / 2.0;
-                // 分别对dx_des_space_rep，dy_des_space_rep，delta_deg三者做trilinear interpolation
-                int dx_idx = static_cast<int>(dx_des_space_rep);
-                int dy_idx = static_cast<int>(dy_des_space_rep);
-                // 角度按45度分为8个区域
-                int deg_idx = static_cast<int>(fabs(delta_deg)) / 45;
+                if(dx_des_space_rep < -1 || dx_des_space_rep > sub_region_num || dy_des_space_rep < -1 || dy_des_space_rep > sub_region_num)
+                {
+                    continue;
+                }
+                // 分别对dx_des_space_rep，dy_des_space_rep，delta_deg（还没定义）三者做trilinear interpolation
+                int dx_idx = std::floor(dx_des_space_rep);
+                int dy_idx = std::floor(dy_des_space_rep);
+                // delta_deg需要记录的是phi相对于theta逆时针旋转的度数
+                // 按照45度分为8个片区，需要解决360度这个问题
+                double delta_deg = (phi_deg < theta_deg) ? (phi_deg + 360.0 - theta_deg) : (phi_deg - theta_deg);
+                int deg_idx = static_cast<int>(delta_deg) / 45;
                 // 计算各比率
                 double dx_ratio = dx_des_space_rep - dx_idx;
                 double dy_ratio = dy_des_space_rep - dy_idx;
-                double deg_ratio = fabs(delta_deg) / 45.0 - deg_idx;
+                double deg_ratio = delta_deg / 45.0 - deg_idx;
                 // 计算加权梯度幅值
-                double num = dx_ori_coord * dx_ori_coord + dy_ori_coord * dy_ori_coord;
+                double num = (dx_ori_coord / sigma_scale) * (dx_ori_coord / sigma_scale);
+                num += (dy_ori_coord / sigma_scale) * (dy_ori_coord / sigma_scale);
                 double denom = -2 * (0.5 * sub_region_num) * (0.5 * sub_region_num);
                 double weighted_grad_norm = m * exp(num / denom);
                 // histogram统计值
